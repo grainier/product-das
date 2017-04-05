@@ -30,6 +30,7 @@ import org.osgi.service.component.annotations.Deactivate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.wso2.carbon.siddhi.editor.core.commons.request.ValidationRequest;
+import org.wso2.carbon.siddhi.editor.core.commons.response.DebugRuntimeResponse;
 import org.wso2.carbon.siddhi.editor.core.commons.response.GeneralResponse;
 import org.wso2.carbon.siddhi.editor.core.commons.response.MetaDataResponse;
 import org.wso2.carbon.siddhi.editor.core.commons.response.Status;
@@ -61,6 +62,7 @@ import javax.ws.rs.POST;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -214,38 +216,81 @@ public class ServiceComponent implements Microservice {
     @Produces("application/json")
     @Path("/debug")
     public Response debug(String executionPlan) {
-        String runtimeId = EditorDataHolder.getDebugProcessorService().deployAndDebug(executionPlan);
-        Set<String> streams = EditorDataHolder.getDebugProcessorService().getRuntimeSpecificStreamsMap().get(runtimeId);
-        return Response.ok().entity("{id:'" + runtimeId + "', streams:" + streams + "}").build();
+        String runtimeId = EditorDataHolder
+                .getDebugProcessorService()
+                .deployAndDebug(executionPlan);
+        Set<String> streams = EditorDataHolder
+                .getDebugProcessorService()
+                .getRuntimeSpecificStreamsMap()
+                .get(runtimeId);
+        return Response
+                .status(Response.Status.OK)
+                .entity(new DebugRuntimeResponse(Status.SUCCESS, null, runtimeId, streams)).build();
     }
 
-    public Response acquireBreakPoint(String runtimeId, String queryName, SiddhiDebugger.QueryTerminal queryTerminal) {
+    @GET
+    @Produces("application/json")
+    @Path("/{runtimeId}/acquire")
+    public Response acquireBreakPoint(
+            @PathParam("runtimeId") String runtimeId,
+            @QueryParam("queryName") String queryName,
+            @QueryParam("queryTerminal") String queryTerminal) {
         return Response.ok().entity("some-value").build();
     }
 
-    public Response releaseBreakPoint(String runtimeId, String queryName, SiddhiDebugger.QueryTerminal queryTerminal) {
-        return null;
+    @GET
+    @Produces("application/json")
+    @Path("/{runtimeId}/release")
+    public Response releaseBreakPoint(
+            @PathParam("runtimeId") String runtimeId,
+            @QueryParam("queryName") String queryName,
+            @QueryParam("queryTerminal") String queryTerminal) {
+        if (queryName == null || queryTerminal == null || queryName.isEmpty() || queryTerminal.isEmpty()) {
+            // release all break points
+            EditorDataHolder
+                    .getDebugProcessorService()
+                    .getSiddhiDebuggerMap()
+                    .get(runtimeId)
+                    .releaseAllBreakPoints();
+            return Response
+                    .status(Response.Status.OK)
+                    .entity(new GeneralResponse(Status.SUCCESS, "All breakpoints released for runtimeId " + runtimeId))
+                    .build();
+        } else {
+            // release only specified break point
+            SiddhiDebugger.QueryTerminal terminal = ("in".equalsIgnoreCase(queryTerminal)) ?
+                    SiddhiDebugger.QueryTerminal.IN : SiddhiDebugger.QueryTerminal.OUT;
+            EditorDataHolder
+                    .getDebugProcessorService()
+                    .getSiddhiDebuggerMap()
+                    .get(runtimeId)
+                    .releaseBreakPoint(queryName, terminal);
+            return Response
+                    .status(Response.Status.OK)
+                    .entity(new GeneralResponse(Status.SUCCESS, "Terminal " + queryTerminal +
+                            " breakpoint released for query " + runtimeId + ":" + queryName))
+                    .build();
+        }
     }
 
     @GET
     @Produces("application/json")
-    @Path("/release/{runtimeId}")
-    public Response releaseAllBreakPoints(@PathParam("runtimeId") String runtimeId) {
-        EditorDataHolder.getDebugProcessorService().getSiddhiDebuggerMap().get(runtimeId).releaseAllBreakPoints();
-        return Response.status(Response.Status.OK).entity("{'status':'ok'}").build();
-    }
-
-    @GET
-    @Produces("application/json")
-    @Path("/next/{runtimeId}")
+    @Path("/{runtimeId}/next")
     public Response next(@PathParam("runtimeId") String runtimeId) {
-        EditorDataHolder.getDebugProcessorService().getSiddhiDebuggerMap().get(runtimeId).next();
-        return Response.status(Response.Status.OK).entity("{'status':'ok'}").build();
+        EditorDataHolder
+                .getDebugProcessorService()
+                .getSiddhiDebuggerMap()
+                .get(runtimeId)
+                .next();
+        return Response
+                .status(Response.Status.OK)
+                .entity(new GeneralResponse(Status.SUCCESS, "All breakpoints released for runtimeId " + runtimeId))
+                .build();
     }
 
     @GET
     @Produces("application/json")
-    @Path("/play/{runtimeId}")
+    @Path("/{runtimeId}/play")
     public Response play(@PathParam("runtimeId") String runtimeId) {
         EditorDataHolder.getDebugProcessorService().getSiddhiDebuggerMap().get(runtimeId).play();
         return Response.status(Response.Status.OK).entity("{'status':'ok'}").build();
@@ -255,11 +300,34 @@ public class ServiceComponent implements Microservice {
     @Produces("application/json")
     @Path("/state/{runtimeId}/{queryName}")
     public Response getQueryState(@PathParam("runtimeId") String runtimeId, @PathParam("queryName") String queryName) {
-        return Response.status(Response.Status.OK).entity(EditorDataHolder.getDebugProcessorService()
-                .getSiddhiDebuggerMap().get(runtimeId).getQueryState(queryName)).build();
+        return Response
+                .status(Response.Status.OK)
+                .entity(
+                        EditorDataHolder
+                                .getDebugProcessorService()
+                                .getSiddhiDebuggerMap()
+                                .get(runtimeId)
+                                .getQueryState(queryName)
+                ).build();
+    }
+
+    @GET
+    @Path("/{runtimeId}/mock")
+    public Response mock(@PathParam("runtimeId") String runtimeId) throws InterruptedException {
+        EditorDataHolder
+                .getDebugProcessorService()
+                .getRuntimeSpecificInputHandlerMap()
+                .get(runtimeId)
+                .get("foo")
+                .send(new Object[]{135, "Sample Data"});
+        return Response
+                .ok()
+                .entity("ok")
+                .build();
     }
 
     /**
+     * s
      * This is the activation method of ServiceComponent. This will be called when its references are
      * satisfied.
      *
