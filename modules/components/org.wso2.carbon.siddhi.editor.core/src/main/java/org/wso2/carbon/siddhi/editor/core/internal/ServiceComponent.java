@@ -27,8 +27,12 @@ import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.Deactivate;
+import org.osgi.service.component.annotations.Reference;
+import org.osgi.service.component.annotations.ReferenceCardinality;
+import org.osgi.service.component.annotations.ReferencePolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.wso2.carbon.siddhi.editor.core.commons.metadata.DebugCallbackEvent;
 import org.wso2.carbon.siddhi.editor.core.commons.request.ValidationRequest;
 import org.wso2.carbon.siddhi.editor.core.commons.response.DebugRuntimeResponse;
 import org.wso2.carbon.siddhi.editor.core.commons.response.GeneralResponse;
@@ -44,6 +48,7 @@ import org.wso2.msf4j.Request;
 import org.wso2.siddhi.core.ExecutionPlanRuntime;
 import org.wso2.siddhi.core.SiddhiManager;
 import org.wso2.siddhi.core.debugger.SiddhiDebugger;
+import org.wso2.siddhi.core.util.SiddhiComponentActivator;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -54,8 +59,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
@@ -67,6 +76,7 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.gson.Gson;
 
 
@@ -79,6 +89,12 @@ import com.google.gson.Gson;
 public class ServiceComponent implements Microservice {
     private static final Logger log = LoggerFactory.getLogger(ServiceComponent.class);
     private ServiceRegistration serviceRegistration;
+    private ExecutorService executorService = Executors
+            .newScheduledThreadPool(
+                    5, new ThreadFactoryBuilder()
+                            .setNameFormat("Debugger-scheduler-thread-%d")
+                            .build()
+            );
 
     private File getResourceAsFile(String resourcePath) {
         try {
@@ -205,7 +221,6 @@ public class ServiceComponent implements Microservice {
         MetaDataResponse response = new MetaDataResponse(Status.SUCCESS);
         response.setInBuilt(MetaDataHolder.getInBuiltProcessorMetaData());
         response.setExtensions(SourceEditorUtils.getExtensionProcessorMetaData());
-
         String jsonString = new Gson().toJson(response);
         return Response.ok(jsonString, MediaType.APPLICATION_JSON)
                 .header("Access-Control-Allow-Origin", "*")
@@ -215,7 +230,7 @@ public class ServiceComponent implements Microservice {
     @POST
     @Produces("application/json")
     @Path("/debug")
-    public Response debug(String executionPlan) {
+    public Response startDebug(String executionPlan) {
         String runtimeId = EditorDataHolder
                 .getDebugProcessorService()
                 .deployAndDebug(executionPlan);
@@ -230,21 +245,67 @@ public class ServiceComponent implements Microservice {
 
     @GET
     @Produces("application/json")
+    @Path("/{runtimeId}/stop")
+    public Response stopDebug(@PathParam("runtimeId") String runtimeId) {
+        EditorDataHolder
+                .getDebugProcessorService()
+                .stopAndUndeploy(runtimeId);
+        return Response
+                .status(Response.Status.OK)
+                .entity(new GeneralResponse(Status.SUCCESS, "Runtime " + runtimeId +
+                        " stopped successfully."))
+                .build();
+    }
+
+    @GET
+    @Produces("application/json")
     @Path("/{runtimeId}/acquire")
-    public Response acquireBreakPoint(
-            @PathParam("runtimeId") String runtimeId,
-            @QueryParam("queryName") String queryName,
-            @QueryParam("queryTerminal") String queryTerminal) {
-        return Response.ok().entity("some-value").build();
+    public Response acquireBreakPoint(@PathParam("runtimeId") String runtimeId,
+                                      @QueryParam("queryName") String queryName,
+                                      @QueryParam("queryTerminal") String queryTerminal) {
+        if (queryName != null && queryTerminal != null && !queryName.isEmpty() && !queryTerminal.isEmpty()) {
+            // acquire only specified break point
+            SiddhiDebugger.QueryTerminal terminal = ("in".equalsIgnoreCase(queryTerminal)) ?
+                    SiddhiDebugger.QueryTerminal.IN : SiddhiDebugger.QueryTerminal.OUT;
+            EditorDataHolder
+                    .getDebugProcessorService()
+                    .getSiddhiDebuggerMap()
+                    .get(runtimeId)
+                    .acquireBreakPoint(queryName, terminal);
+            return Response
+                    .status(Response.Status.OK)
+                    .entity(new GeneralResponse(Status.SUCCESS, "Terminal " + queryTerminal +
+                            " breakpoint acquired for query " + runtimeId + ":" + queryName))
+                    .build();
+        } else {
+            return Response
+                    .status(Response.Status.BAD_REQUEST)
+                    .entity(new GeneralResponse(Status.ERROR, "Missing Parameters"))
+                    .build();
+        }
+    }
+
+    @GET
+    @Produces("application/json")
+    @Path("/{runtimeId}/poll")
+    public Response pollState(@PathParam("runtimeId") String runtimeId) throws InterruptedException {
+        DebugCallbackEvent event = EditorDataHolder
+                .getDebugProcessorService()
+                .getRuntimeSpecificCallbackMap()
+                .get(runtimeId)
+                .poll(5, TimeUnit.SECONDS);
+        return Response
+                .status(Response.Status.OK)
+                .entity(event)
+                .build();
     }
 
     @GET
     @Produces("application/json")
     @Path("/{runtimeId}/release")
-    public Response releaseBreakPoint(
-            @PathParam("runtimeId") String runtimeId,
-            @QueryParam("queryName") String queryName,
-            @QueryParam("queryTerminal") String queryTerminal) {
+    public Response releaseBreakPoint(@PathParam("runtimeId") String runtimeId,
+                                      @QueryParam("queryName") String queryName,
+                                      @QueryParam("queryTerminal") String queryTerminal) {
         if (queryName == null || queryTerminal == null || queryName.isEmpty() || queryTerminal.isEmpty()) {
             // release all break points
             EditorDataHolder
@@ -284,7 +345,7 @@ public class ServiceComponent implements Microservice {
                 .next();
         return Response
                 .status(Response.Status.OK)
-                .entity(new GeneralResponse(Status.SUCCESS, "All breakpoints released for runtimeId " + runtimeId))
+                .entity("{'status':'ok'}")
                 .build();
     }
 
@@ -292,14 +353,22 @@ public class ServiceComponent implements Microservice {
     @Produces("application/json")
     @Path("/{runtimeId}/play")
     public Response play(@PathParam("runtimeId") String runtimeId) {
-        EditorDataHolder.getDebugProcessorService().getSiddhiDebuggerMap().get(runtimeId).play();
-        return Response.status(Response.Status.OK).entity("{'status':'ok'}").build();
+        EditorDataHolder
+                .getDebugProcessorService()
+                .getSiddhiDebuggerMap()
+                .get(runtimeId)
+                .play();
+        return Response
+                .status(Response.Status.OK)
+                .entity("{'status':'ok'}")
+                .build();
     }
 
     @GET
     @Produces("application/json")
     @Path("/state/{runtimeId}/{queryName}")
-    public Response getQueryState(@PathParam("runtimeId") String runtimeId, @PathParam("queryName") String queryName) {
+    public Response getQueryState(@PathParam("runtimeId") String runtimeId,
+                                  @PathParam("queryName") String queryName) {
         return Response
                 .status(Response.Status.OK)
                 .entity(
@@ -311,18 +380,32 @@ public class ServiceComponent implements Microservice {
                 ).build();
     }
 
-    @GET
-    @Path("/{runtimeId}/mock")
-    public Response mock(@PathParam("runtimeId") String runtimeId) throws InterruptedException {
-        EditorDataHolder
-                .getDebugProcessorService()
-                .getRuntimeSpecificInputHandlerMap()
-                .get(runtimeId)
-                .get("foo")
-                .send(new Object[]{135, "Sample Data"});
+    // TODO: 4/16/17 Integrate simulator instead of this
+    @POST
+    @Produces("application/json")
+    @Path("/{runtimeId}/{streamId}/send")
+    public Response mock(String data,
+                         @PathParam("runtimeId") String runtimeId,
+                         @PathParam("streamId") String streamId) {
+        Gson gson = new Gson();
+        Object[] event = gson.fromJson(data, Object[].class);
+        executorService.execute(() -> {
+            try {
+                EditorDataHolder
+                        .getDebugProcessorService()
+                        .getRuntimeSpecificInputHandlerMap()
+                        .get(runtimeId)
+                        .get(streamId)
+                        .send(event);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        });
         return Response
-                .ok()
-                .entity("ok")
+                .status(Response.Status.OK)
+                .entity(new GeneralResponse(Status.SUCCESS, "Event " + Arrays.deepToString(event) +
+                        " sent to stream " + streamId + " of runtime " + runtimeId))
                 .build();
     }
 
@@ -356,13 +439,35 @@ public class ServiceComponent implements Microservice {
     @Deactivate
     protected void stop() throws Exception {
         log.info("Service Component is deactivated");
-
         Map<String, ExecutionPlanRuntime> executionPlanRunTimeMap = EditorDataHolder.
                 getDebugProcessorService().getExecutionPlanRunTimeMap();
-        for (ExecutionPlanRuntime runtime : executionPlanRunTimeMap.values()) {
-            runtime.shutdown();
-        }
+        executionPlanRunTimeMap.values().forEach(ExecutionPlanRuntime::shutdown);
         EditorDataHolder.setBundleContext(null);
         serviceRegistration.unregister();
+    }
+
+    /**
+     * This bind method will be called when Siddhi ComponentActivator OSGi service is registered.
+     *
+     * @param siddhiComponentActivator The SiddhiComponentActivator instance registered by Siddhi OSGi service
+     */
+    @Reference(
+            name = "siddhi.component.activator.service",
+            service = SiddhiComponentActivator.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetSiddhiComponentActivator"
+    )
+    protected void setSiddhiComponentActivator(SiddhiComponentActivator siddhiComponentActivator) {
+
+    }
+
+    /**
+     * This is the unbind method which gets called at the un-registration of CarbonRuntime OSGi service.
+     *
+     * @param siddhiComponentActivator The SiddhiComponentActivator instance registered by Siddhi OSGi service
+     */
+    protected void unsetSiddhiComponentActivator(SiddhiComponentActivator siddhiComponentActivator) {
+
     }
 }
